@@ -1,21 +1,17 @@
 package tau
 
 import (
-	"bytes"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/sha512"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
-	"fmt"
 	"math/big"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pkg/errors"
 
 	"github.com/dgrijalva/jwt-go"
 	adr "github.com/iotaledger/iota.go/address"
@@ -23,6 +19,7 @@ import (
 	"github.com/iotaledger/iota.go/bundle"
 	con "github.com/iotaledger/iota.go/converter"
 	tran "github.com/iotaledger/iota.go/transaction"
+	tri "github.com/iotaledger/iota.go/trinary"
 )
 
 type byTimeStampDesc tran.Transactions
@@ -35,94 +32,54 @@ func (a byTimeStampDesc) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 
 // CreateOrUpdateTangleID -
 func CreateOrUpdateTangleID(api *ioa.API, seed string, optionalIDFields OptionalIDFields) (string, error) {
-	pKey, err := ecdsa.GenerateKey(elliptic.P521(), newWrappingStringReader(seed))
-	if err != nil {
-		panic(err)
+	if seed == "" {
+		return "", ErrEmptySeed
 	}
 
-	// Marshall the private key
-	privateKeyString, err := x509.MarshalECPrivateKey(pKey)
-	if err != nil {
-		panic(err)
+	if api == nil {
+		return "", ErrInvalidIOTAAPI
 	}
 
-	// Marshall the public key
-	publicKeyBytes, err := x509.MarshalPKIXPublicKey(&pKey.PublicKey)
+	key, err := GenerateKey(seed)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "generate key failed")
 	}
 
-	// Create and encode the pem block.
-	// Pem blocks are the format used when using the keys
-	privatePem := pem.Block{
-		Type:  "PRIVATE KEY",
-		Bytes: privateKeyString,
-	}
-
-	privateBuf := new(bytes.Buffer)
-	err = pem.Encode(privateBuf, &privatePem)
+	publicPem, err := GeneratePublicPem(key)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "generate public pem failed")
 	}
-	publicPem := pem.Block{
-		Type:  "PUBLIC KEY",
-		Bytes: publicKeyBytes,
-	}
-	publicBuf := new(bytes.Buffer)
-	err = pem.Encode(publicBuf, &publicPem)
-	if err != nil {
-		panic(err)
-	}
-	// Print out the private and public key
-	fmt.Println(privateBuf.String())
-	fmt.Println(publicBuf.String())
 
 	// Hash the public key
-	checksum := sha512.New()
-	publicHash := checksum.Sum(publicKeyBytes)
-
-	fmt.Println("---Public Hash---")
-	fmt.Println(base64.StdEncoding.EncodeToString(publicHash[:]))
-	r, s, err := ecdsa.Sign(newWrappingStringReader(seed), pKey, publicHash)
+	signature, err := Sign(newWrappingStringReader(seed), key, publicPem)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "signing the public pem failed")
 	}
-	signature := r.Bytes()
-	signature = append(signature, s.Bytes()...)
 	signatureString := base64.StdEncoding.EncodeToString(signature[:])
-	fmt.Println("---Signature Length---")
-	fmt.Println(strconv.Itoa(len(signature)))
-	fmt.Println(base64.StdEncoding.EncodeToString(signature[:]))
 
 	reference, err := GenerateReferenceFromSignature(signatureString)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "could not generate a reference from the signature")
 	}
-	fmt.Println("---Reference address---")
-	fmt.Println(reference)
 
+	encodedPublicPem := base64.StdEncoding.EncodeToString(publicPem)
 	msg := TangleID{
 		OptionalIDFields: optionalIDFields,
-		PublicKey:        publicBuf.String(),
+		PublicKey:        encodedPublicPem,
 		Signature:        signatureString,
 	}
-	_ = msg
 
 	jsonMsg, err := json.Marshal(msg)
 	if nil != err {
-		panic(err)
+		return "", errors.Wrap(err, "marshall message to json failed")
 	}
 
 	jsonMsgString := base64.StdEncoding.EncodeToString(jsonMsg[:])
 
 	tryteMsg, err := con.ASCIIToTrytes(jsonMsgString)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "converting json string to trytes failed")
 	}
-
-	fmt.Println("---Message---")
-	fmt.Println(tryteMsg)
-
 	transfers := bundle.Transfers{
 		{
 			Address: reference,
@@ -135,7 +92,7 @@ func CreateOrUpdateTangleID(api *ioa.API, seed string, optionalIDFields Optional
 	timestamp := uint64(time.Now().UnixNano() / int64(time.Second))
 	bundleEntries, err := bundle.TransfersToBundleEntries(timestamp, transfers...)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "converting transactions to bundle entries failed")
 	}
 
 	txs := tran.Transactions{}
@@ -145,87 +102,44 @@ func CreateOrUpdateTangleID(api *ioa.API, seed string, optionalIDFields Optional
 
 	finalizedBundle, err := bundle.Finalize(txs)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "could not finalize bundle")
 	}
 
-	finishedBundle, err := api.SendTrytes(tran.MustFinalTransactionTrytes(finalizedBundle), 3, 14)
+	_, err = api.SendTrytes(tran.MustFinalTransactionTrytes(finalizedBundle), 3, 14)
 	if err != nil {
-		panic(err)
+		return "", ErrCallingTangle
 	}
-	fmt.Println("---Tail transaction hash---")
-	fmt.Println(bundle.TailTransactionHash(finishedBundle))
 
 	return reference, nil
 }
 
 // GenerateReference generates a new reference from a seed
 func GenerateReference(seed string) (string, error) {
-	pKey, err := ecdsa.GenerateKey(elliptic.P521(), newWrappingStringReader(seed))
-	if err != nil {
-		panic(err)
+	if seed == "" {
+		return "", ErrEmptySeed
 	}
 
-	// Marshall the private key
-	privateKeyString, err := x509.MarshalECPrivateKey(pKey)
+	key, err := GenerateKey(seed)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "generate key failed")
 	}
 
-	// Marshall the public key
-	publicKeyBytes, err := x509.MarshalPKIXPublicKey(&pKey.PublicKey)
+	publicPem, err := GeneratePublicPem(key)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "generate public pem failed")
 	}
-
-	// Create and encode the pem block.
-	// Pem blocks are the format used when using the keys
-	privatePem := pem.Block{
-		Type:  "PRIVATE KEY",
-		Bytes: privateKeyString,
-	}
-
-	privateBuf := new(bytes.Buffer)
-	err = pem.Encode(privateBuf, &privatePem)
-	if err != nil {
-		panic(err)
-	}
-	publicPem := pem.Block{
-		Type:  "PUBLIC KEY",
-		Bytes: publicKeyBytes,
-	}
-
-	publicBuf := new(bytes.Buffer)
-	err = pem.Encode(publicBuf, &publicPem)
-	if err != nil {
-		panic(err)
-	}
-	// Print out the private and public key
-	fmt.Println(privateBuf.String())
-	fmt.Println(publicBuf.String())
 
 	// Hash the public key
-	checksum := sha512.New()
-	publicHash := checksum.Sum(publicKeyBytes)
-
-	fmt.Println("---Public Hash---")
-	fmt.Println(base64.StdEncoding.EncodeToString(publicHash[:]))
-	r, s, err := ecdsa.Sign(newWrappingStringReader(seed), pKey, publicHash)
+	signature, err := Sign(newWrappingStringReader(seed), key, publicPem)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "signing the public pem failed")
 	}
-	signature := r.Bytes()
-	signature = append(signature, s.Bytes()...)
 	signatureString := base64.StdEncoding.EncodeToString(signature[:])
-	fmt.Println("---Signature Length---")
-	fmt.Println(strconv.Itoa(len(signature)))
-	fmt.Println(base64.StdEncoding.EncodeToString(signature[:]))
 
 	reference, err := GenerateReferenceFromSignature(signatureString)
 	if err != nil {
-		panic(err)
+		return "", errors.Wrap(err, "could not generate a reference from the signature")
 	}
-	fmt.Println("---Reference address---")
-	fmt.Println(reference)
 
 	return reference, nil
 }
@@ -233,26 +147,29 @@ func GenerateReference(seed string) (string, error) {
 // SignRequest populates the request Authorization header with a JWT
 // This JWT has the sub set to your reference on the tangle and the aud set to the request url
 func SignRequest(seed string, r *http.Request) error {
+	if r == nil {
+		return ErrNilRequest
+	}
 	if seed == "" {
 		return ErrEmptySeed
 	}
 	key, err := GenerateKey(seed)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "could not generate key from seed")
 	}
 	privatePem, err := GeneratePrivatePem(key)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "could not generate private pem")
 	}
 
 	privateKey, err := jwt.ParseECPrivateKeyFromPEM(privatePem)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "could not parse private pem")
 	}
 
 	reference, err := GenerateReference(seed)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "could not generate a reference from the seed")
 	}
 
 	url := r.Host + r.URL.Path
@@ -268,7 +185,7 @@ func SignRequest(seed string, r *http.Request) error {
 	token := jwt.NewWithClaims(jwt.SigningMethodES512, claims)
 	tokenString, err := token.SignedString(privateKey)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "could not sign the jwt")
 	}
 
 	r.Header.Set("Authorization", "Bearer "+tokenString)
@@ -276,8 +193,12 @@ func SignRequest(seed string, r *http.Request) error {
 	return nil
 }
 
-// VerifyRequest -
+// VerifyRequest verifies the request based on the authorization header with the tangle.
+// If the person is authorized this function returns a TangleID else it return nil
 func VerifyRequest(api *ioa.API, r *http.Request) (*TangleID, error) {
+	if api == nil {
+		return nil, ErrInvalidIOTAAPI
+	}
 	url := r.Host + r.URL.Path
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
@@ -290,97 +211,96 @@ func VerifyRequest(api *ioa.API, r *http.Request) (*TangleID, error) {
 	_, err := jwt.ParseWithClaims(tokenRaw, claims, nil)
 	// If the token is malformed we cannot use it if it is a verification error we can just move on
 	if err.(*jwt.ValidationError).Errors&jwt.ValidationErrorMalformed != 0 {
-		return nil, err
+		return nil, nil
 	}
 
 	if claims.Subject == "" {
-		return nil, ErrNotVerified
+		return nil, nil
 	}
 
 	if claims.Audience == "" {
-		return nil, ErrNotVerified
+		return nil, nil
 	}
 
 	if claims.Audience != url {
-		return nil, ErrNotVerified
+		return nil, nil
 	}
 
 	// If the subject is not a valid iota address we know for sure that the token is invalid
 	if adr.ValidAddress(claims.Subject) != nil {
-		return nil, ErrNotVerified
+		return nil, nil
 	}
 
 	hashes, err := api.FindTransactions(ioa.FindTransactionsQuery{
 		Addresses: []string{claims.Subject},
 	})
 	if err != nil {
-		return nil, err
+		// We checked the address so the only way this fails should be if we can't reach the node
+		return nil, ErrCallingTangle
+	}
+	// If we didn't get any hashes it means there are not transactions so we cannot authorize
+	if len(hashes) == 0 {
+		return nil, nil
 	}
 
 	transactions, err := api.GetTransactionObjects(hashes...)
 	if err != nil {
-		return nil, err
+		// We got the hashes directly from the tangle so this only fails if we can't reach the node
+		return nil, ErrCallingTangle
 	}
 	sort.Sort(byTimeStampDesc(transactions))
 	for _, v := range transactions {
-		fmt.Println("transaction hash")
-		fmt.Println(v.Hash)
 		signatureMessageFragment := strings.TrimRight(v.SignatureMessageFragment, "9")
+
+		// If any of the following operations fail that means the data in the transaction wasn't valid.
+		// The transaction cannot be considered for authentication so we continue to the next one.
+		if err := tri.ValidTrytes(signatureMessageFragment); err != nil {
+			continue
+		}
 		msg, err := con.TrytesToASCII(signatureMessageFragment)
 		if err != nil {
-			panic(err)
+			continue
 		}
 		msgJSON, err := base64.StdEncoding.DecodeString(msg)
 		if err != nil {
-			panic(err)
+			continue
 		}
 		tangleID := TangleID{}
 		if err := json.Unmarshal(msgJSON, &tangleID); err != nil {
-			panic(err)
+			continue
 		}
-
-		publicKey, err := jwt.ParseECPublicKeyFromPEM([]byte(tangleID.PublicKey))
+		decodedPublicKeyData, err := base64.StdEncoding.DecodeString(tangleID.PublicKey)
 		if err != nil {
-			panic(err)
+			continue
+		}
+		publicKey, err := jwt.ParseECPublicKeyFromPEM(decodedPublicKeyData)
+		if err != nil {
+			continue
 		}
 
 		token, err := jwt.Parse(tokenRaw, func(token *jwt.Token) (interface{}, error) {
 			return publicKey, nil
 		})
-		if err != nil {
-			panic(err)
-		}
-
-		if !token.Valid {
-			panic(err)
+		if err != nil || !token.Valid {
+			continue
 		}
 
 		signature, err := base64.StdEncoding.DecodeString(tangleID.Signature)
 		if err != nil {
-			panic(err)
+			continue
 		}
 		signatureLength := len(signature) / 2
 		r := new(big.Int).SetBytes(signature[:signatureLength])
 		s := new(big.Int).SetBytes(signature[signatureLength:])
 
-		publicKeyBytes, err := x509.MarshalPKIXPublicKey(publicKey)
-		if err != nil {
-			panic(err)
-		}
 		checksum := sha512.New()
-		publicHash := checksum.Sum(publicKeyBytes)
+		publicHash := checksum.Sum(decodedPublicKeyData)
 		if !ecdsa.Verify(publicKey, publicHash, r, s) {
-			fmt.Println("signature couldn not be verified")
 			continue
 		}
 
 		reference, err := GenerateReferenceFromSignature(tangleID.Signature)
-		if err != nil {
-			panic(err)
-		}
-
-		if reference != claims.Subject {
-			fmt.Println("reference did not match subject")
+		if err != nil || reference != claims.Subject {
 			continue
 		}
 
@@ -388,5 +308,5 @@ func VerifyRequest(api *ioa.API, r *http.Request) (*TangleID, error) {
 	}
 
 	// We couldn't find a valid transaction on the tangle
-	return nil, ErrNotVerified
+	return nil, nil
 }

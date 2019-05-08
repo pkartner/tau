@@ -1,23 +1,23 @@
 package tau
 
 import (
+	"github.com/pkg/errors"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 
 	ics "github.com/iotaledger/iota.go/checksum"
 	con "github.com/iotaledger/iota.go/converter"
 	curl "github.com/iotaledger/iota.go/curl"
 )
 
-// GenerateKey-
+// GenerateKey -
 func GenerateKey(seed string) (*ecdsa.PrivateKey, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P521(), newWrappingStringReader(seed))
-	if err != nil {
-		return nil, err
-	}
 	return key, err
 }
 
@@ -25,7 +25,7 @@ func GenerateKey(seed string) (*ecdsa.PrivateKey, error) {
 func GeneratePrivatePem(key *ecdsa.PrivateKey) ([]byte, error) {
 	privateKey, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "marshal key failed")
 	}
 
 	privatePem := pem.Block{
@@ -36,7 +36,7 @@ func GeneratePrivatePem(key *ecdsa.PrivateKey) ([]byte, error) {
 	buffer := new(bytes.Buffer)
 	err = pem.Encode(buffer, &privatePem)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "could not encode the key")
 	}
 
 	return buffer.Bytes(), nil
@@ -46,7 +46,7 @@ func GeneratePrivatePem(key *ecdsa.PrivateKey) ([]byte, error) {
 func GeneratePublicPem(key *ecdsa.PrivateKey) ([]byte, error) {
 	publicKey, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "marshal key failed")
 	}
 
 	publicPem := pem.Block{
@@ -56,7 +56,7 @@ func GeneratePublicPem(key *ecdsa.PrivateKey) ([]byte, error) {
 	buffer := new(bytes.Buffer)
 	err = pem.Encode(buffer, &publicPem)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "could not encode the key")
 	}
 
 	return buffer.Bytes(), nil
@@ -66,14 +66,27 @@ func GeneratePublicPem(key *ecdsa.PrivateKey) ([]byte, error) {
 func GenerateReferenceFromSignature(signature string) (string, error) {
 	trytes, err := con.ASCIIToTrytes(signature)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, "convert the signature to trytes failed")
 	}
 	reference, err := curl.HashTrytes(trytes, 81)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, "hashing trytes failed")
 	}
 
 	referenceWithChecksum, err := ics.AddChecksum(reference[:81], true, 9)
 
 	return referenceWithChecksum, err
+}
+
+// Sign -
+func Sign(rand io.Reader, key *ecdsa.PrivateKey, value []byte) ([]byte, error) {
+	checksum := sha512.New()
+	publicHash := checksum.Sum(value)
+	r, s, err := ecdsa.Sign(rand, key, publicHash)
+	if err != nil {
+		return nil, errors.Wrap(err, "signing hash failed")
+	}
+	signature := r.Bytes()
+	signature = append(signature, s.Bytes()...)
+	return signature, nil
 }

@@ -2,7 +2,7 @@ package tau
 
 // OptionalIDFields -
 type OptionalIDFields struct {
-	Email string `json:"email,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 // TangleID is attached to the tangle and used for identification

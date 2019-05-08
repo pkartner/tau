@@ -12,7 +12,7 @@ import (
 	"github.com/pkartner/tau"
 )
 
-const defaultNodeURL = "https://node01.iotatoken.nl:443"
+const nodeURL = "https://node01.iotatoken.nl:443"
 const requestURL = "http://127.0.0.1:8080/"
 
 func createTangleID(c *cli.Context) {
@@ -22,21 +22,31 @@ func createTangleID(c *cli.Context) {
 		return
 	}
 
-	nodeURL := defaultNodeURL
-	if flagNodeURL := c.String("node"); flagNodeURL != "" {
-		nodeURL = flagNodeURL
-	}
 	api, err := ioa.ComposeAPI(ioa.HTTPClientSettings{
 		URI: nodeURL,
 	})
 	if err != nil {
+		fmt.Println("We got the following error when we tried composing the iota api ", err)
+		return
+	}
+
+	fmt.Printf("Creating an account on the tangle using \"%s\" as a seed...\n", seed)
+
+	reference, err := tau.CreateOrUpdateTangleID(api, seed, tau.OptionalIDFields{
+		// If the user gave a name we extract it and attach it to the tangleID
+		Name: c.String("name"),
+	})
+	if err == tau.ErrCallingTangle {
+		// Tangle node is not available right now normally we should have a backup node to try again
+		fmt.Println("Something wen't wrong while calling the tangle. You could try to change the nodeURL constant with a healthy node found here https://www.iotatoken.nl/")
+		return
+	}
+	if err != nil {
+		// Should not happen so we panic this unhappy flow
 		panic(err)
 	}
-	fmt.Println(seed)
-
-	tau.CreateOrUpdateTangleID(api, seed, tau.OptionalIDFields{
-		Email: "test@test.nl",
-	})
+	fmt.Printf("Account succesfully created your reference is %s\n", reference)
+	fmt.Printf("Go to https://thetangle.org/address/%s to check it out.", reference)
 }
 
 func request(c *cli.Context) {
@@ -53,6 +63,7 @@ func request(c *cli.Context) {
 
 	err = tau.SignRequest(seed, request)
 	if err != nil {
+		// If we get a error that means something none input depenend went wrong so we panic
 		panic(err)
 	}
 
@@ -60,17 +71,33 @@ func request(c *cli.Context) {
 
 	response, err := client.Do(request)
 	if err != nil {
-		panic(err)
+		fmt.Println("We could not make a request something wen't wrong on the server or there is something wrong with your connection.")
+		return
+	}
+	if response.StatusCode == http.StatusUnauthorized {
+		fmt.Println("You could not be authorized, did you create an account on the tangle?")
+		return
+	}
+	if response.StatusCode == http.StatusServiceUnavailable {
+		fmt.Println("Server could currently not authenticate you because it was unavailable. It probably is because the tangle node was not availabe. You could try to change the nodeURL constant with a healthy node found here https://www.iotatoken.nl/ ")
+		return
+	}
+	if response.StatusCode != http.StatusOK {
+		fmt.Println("Something went wrong on the server.")
+		return
 	}
 
 	defer response.Body.Close()
-
+	fmt.Println("You are authorized")
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("The email associated with this account is")
-	fmt.Println(string(body))
+	name := string(body)
+	if name == "" {
+		return
+	}
+	fmt.Printf("The name associated with this id is %s\n", name)
 }
 
 func commands() []cli.Command {
@@ -85,9 +112,8 @@ func commands() []cli.Command {
 					Usage: "Seed to be used for generating your private/public key and reference address. This can be any string, a longer seed is more secure.",
 				},
 				cli.StringFlag{
-					Name:  "node, n",
-					Value: defaultNodeURL,
-					Usage: "URL of a iota node for interacting with the tangle.",
+					Name:  "name, n",
+					Usage: "Name that will be attached to your id",
 				},
 			},
 			Action: createTangleID,

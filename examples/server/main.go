@@ -9,7 +9,7 @@ import (
 	"github.com/pkartner/tau"
 )
 
-const host = "https://node01.iotatoken.nl:443"
+const nodeURL = "https://node01.iotatoken.nl:443"
 
 type server struct {
 	iotaAPI *ioa.API
@@ -21,20 +21,31 @@ var tangleIDKey = contextKey("tangle-id-key")
 
 func (s *server) authMiddleware(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		println("Request Received")
-		println("Verifying...")
+		fmt.Println("Request received")
+		fmt.Println("Verifying...")
 		tangleID, err := tau.VerifyRequest(s.iotaAPI, r)
-		if err != nil {
+		if err == tau.ErrEmptyAuthorization {
 			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Println(err)
+			fmt.Println("Could not authorize")
+			return
+		}
+		if err == tau.ErrCallingTangle {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			// Tangle node is not available right now normally we should have a backup node to try again
+			fmt.Println("Tangle node is not available right now. You could try to change the nodeURL constant with a healthy node found here https://www.iotatoken.nl/")
+			return
+		}
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Println("We received the following error when trying to authenticate ", err)
 			return
 		}
 		if tangleID == nil {
 			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Println("couldn't authorize")
+			fmt.Println("Could not authorize")
 			return
 		}
-		println("Request Authorized")
+		fmt.Println("Request authorized")
 		r = r.WithContext(context.WithValue(r.Context(), tangleIDKey, tangleID))
 		h(w, r)
 	}
@@ -52,12 +63,13 @@ func (s *server) handler(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("context value is not tangleID")
 		return
 	}
-	w.Write([]byte(tangleID.Email))
+	w.Write([]byte(tangleID.Name))
 }
 
 func main() {
+	fmt.Println("Starting server...")
 	api, err := ioa.ComposeAPI(ioa.HTTPClientSettings{
-		URI: host,
+		URI: nodeURL,
 	})
 	if err != nil {
 		panic(err)
@@ -65,6 +77,7 @@ func main() {
 	s := server{
 		iotaAPI: api,
 	}
+	fmt.Println("Ready! Please make a tangle authentication request.")
 	http.Handle("/", s.authMiddleware(s.handler))
 	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
