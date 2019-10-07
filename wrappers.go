@@ -1,11 +1,8 @@
 package tau
 
 import (
-	"crypto/ecdsa"
-	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"sort"
 	"strings"
@@ -182,7 +179,7 @@ func SignRequest(seed string, r *http.Request) error {
 		ExpiresAt: expirationTime.Unix(),
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodES512, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
 	tokenString, err := token.SignedString(privateKey)
 	if err != nil {
 		return errors.Wrap(err, "could not sign the jwt")
@@ -278,6 +275,7 @@ func VerifyRequest(api *ioa.API, r *http.Request) (*TangleID, error) {
 			continue
 		}
 
+		// Verify the jwt for validty
 		token, err := jwt.Parse(tokenRaw, func(token *jwt.Token) (interface{}, error) {
 			return publicKey, nil
 		})
@@ -289,13 +287,8 @@ func VerifyRequest(api *ioa.API, r *http.Request) (*TangleID, error) {
 		if err != nil {
 			continue
 		}
-		signatureLength := len(signature) / 2
-		r := new(big.Int).SetBytes(signature[:signatureLength])
-		s := new(big.Int).SetBytes(signature[signatureLength:])
 
-		checksum := sha512.New()
-		publicHash := checksum.Sum(decodedPublicKeyData)
-		if !ecdsa.Verify(publicKey, publicHash, r, s) {
+		if !Verify(decodedPublicKeyData, signature, publicKey) {
 			continue
 		}
 

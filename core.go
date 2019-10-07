@@ -1,14 +1,16 @@
 package tau
 
 import (
-	"github.com/pkg/errors"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/sha512"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"io"
+	"math/big"
+
+	"github.com/pkg/errors"
 
 	ics "github.com/iotaledger/iota.go/checksum"
 	con "github.com/iotaledger/iota.go/converter"
@@ -17,7 +19,7 @@ import (
 
 // GenerateKey -
 func GenerateKey(seed string) (*ecdsa.PrivateKey, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P521(), newWrappingStringReader(seed))
+	key, err := ecdsa.GenerateKey(elliptic.P256(), newWrappingStringReader(seed))
 	return key, err
 }
 
@@ -80,13 +82,32 @@ func GenerateReferenceFromSignature(signature string) (string, error) {
 
 // Sign -
 func Sign(rand io.Reader, key *ecdsa.PrivateKey, value []byte) ([]byte, error) {
-	checksum := sha512.New()
-	publicHash := checksum.Sum(value)
-	r, s, err := ecdsa.Sign(rand, key, publicHash)
+	publicHash := sha256.Sum256(value)
+	r, s, err := ecdsa.Sign(rand, key, publicHash[:])
 	if err != nil {
 		return nil, errors.Wrap(err, "signing hash failed")
 	}
-	signature := r.Bytes()
-	signature = append(signature, s.Bytes()...)
+
+	params := key.Curve.Params()
+	curveOrderByteSize := params.P.BitLen() / 8
+	rBytes, sBytes := r.Bytes(), s.Bytes()
+	signature := make([]byte, curveOrderByteSize*2)
+	copy(signature[curveOrderByteSize-len(rBytes):], rBytes)
+	copy(signature[curveOrderByteSize*2-len(sBytes):], sBytes)
+
 	return signature, nil
+}
+
+// Verify -
+func Verify(data, signature []byte, publicKey *ecdsa.PublicKey) bool {
+	hash := sha256.Sum256(data)
+
+	curveOrderByteSize := publicKey.Curve.Params().P.BitLen() / 8
+
+	r, s := new(big.Int), new(big.Int)
+	r.SetBytes(signature[:curveOrderByteSize])
+	s.SetBytes(signature[curveOrderByteSize:])
+
+	return ecdsa.Verify(publicKey, hash[:], r, s)
+
 }
